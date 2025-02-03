@@ -31,7 +31,17 @@ void FirstStepSigmaDelta(unsigned int NbPixels, unsigned char* M, unsigned char*
 
 void FirstStepSigmaDelta_simd(unsigned int NbPixels, unsigned char* M, unsigned char* I, unsigned short* V)
 {
-	// A COMPLETER
+	unsigned int i;
+
+	__m128i vecZero = _mm_set1_epi8(0x00);
+	__m128i vecBlack = _mm_set1_epi8(BLACK);
+
+	for (i = 0; i < NbPixels; i += 16) {
+		_mm_store_si128((__m128i*)&M[i], _mm_load_si128((__m128i*) & I[i])); //Comme les entiers peuvent etre codes sur differents nomrbe de bits pour load on cast en 128i
+		_mm_store_si128((__m128i*)&V[i], vecZero);
+		_mm_store_si128((__m128i*) & V[i+8], vecZero);
+		_mm_store_si128((__m128i*) & I[i], vecBlack);
+	}
 }
 
 void SigmaDelta(unsigned int NbPixels, unsigned int NbImages, unsigned char* M, unsigned char* I, unsigned short* V, unsigned char N)
@@ -74,7 +84,46 @@ void SigmaDelta(unsigned int NbPixels, unsigned int NbImages, unsigned char* M, 
 
 void SigmaDelta_simd(unsigned int NbPixels, unsigned int NbImages, unsigned char* M, unsigned char* I, unsigned short* V, unsigned char N)
 {
-	// A COMPLETER
+	unsigned int	i, j, n,  Offset = 0;
+	__m128i	vec_tmp_M, vec_tmp_I, vec_Delta; //char
+	__m128i	vec_tmp_V, vec_DeltaN = _mm_set1_epi16(0x0000); //short
+	__m128i vec_mask, vec_inc, vec_dec;
+	__m128i vec_white = _mm_set1_epi8(WHITE);
+
+	for (j = 0, Offset = 0; j < NbImages; j++, Offset += NbPixels)
+		for (i = 0; i < NbPixels; i+=16) {
+			vec_tmp_M = _mm_load_si128((__m128i*) & M[i]);
+			vec_tmp_I = _mm_load_si128((__m128i*) & I[Offset + i]);
+			vec_tmp_V = _mm_load_si128((__m128i*) & V[i]);
+
+			// if (tmp_M < tmp_I) tmp_M++; if (tmp_M > tmp_I) tmp_M--; else tmp_M;
+			// On est pas sense avoir M qui depasse 255 car c'est la moyenne de valeur sur 8 bits donc adds ne devrait pas poser de pb
+			// Pb : les comparaisons existent que sur les epi
+			// on fait subs(a,b) on aura : 0 si b>a (valeur saturee) ; une valeur >=1 si a>b ; ça donne un masque interessant pour faire l'operation
+			// si on prend min(subs(a,b);0x1) on aura 0 si b>a et 0x1 sinon
+			vec_tmp_M = _mm_adds_epu8(vec_tmp_M,_mm_min_epu8(_mm_subs_epu8(vec_tmp_M, vec_tmp_I), _mm_set1_epi8(1))); // if (tmp_M < tmp_I) tmp_M++;
+			vec_tmp_M = _mm_subs_epu8(vec_tmp_M, _mm_min_epu8(_mm_subs_epu8(vec_tmp_I, vec_tmp_M), _mm_set1_epi8(1))); // if (tmp_I < tmp_M) tmp_M--;
+
+			vec_Delta = _mm_subs_epu8(_mm_max_epu8(vec_tmp_M,vec_tmp_I), _mm_min_epu8(vec_tmp_M,vec_tmp_I));
+
+			// vec_DeltaN = _mm_vec_Delta * N;
+			for (n = 0; n < N; n++) {
+				vec_DeltaN = _mm_adds_epu8(vec_DeltaN, vec_Delta);
+			}
+			vec_mask = _mm_cmpeq_epi8(vec_Delta, _mm_set1_epi8(0x00)); // if Delta==0
+			vec_inc = _mm_andnot_si128(vec_mask, _mm_min_epu8(_mm_subs_epi8(vec_DeltaN, vec_tmp_V), _mm_set1_epi8(1))); // vec_inc = 1 if (tmp_V < DeltaN) & Delta!0
+			vec_dec = _mm_andnot_si128(vec_mask, _mm_min_epu8(_mm_subs_epi8(vec_tmp_V, vec_DeltaN), _mm_set1_epi8(1))); // vec_inc = 1 if (tmp_V > DeltaN) & Delta!0
+
+			vec_tmp_V = _mm_adds_epu8(vec_tmp_M, vec_inc); // tmp_V += vec_inc;
+			vec_tmp_V = _mm_subs_epu8(vec_tmp_M, vec_dec); // tmp_V += vec_dec;
+
+			vec_mask = _mm_cmpeq_epi8(_mm_min_epu8(vec_Delta, vec_tmp_V), vec_Delta); // if Delta < tmp_V
+			vec_tmp_I = vec_mask; // I = 0xff  if Delta < tmp_V, 0x00 else
+		
+			_mm_store_si128((__m128i*) & M[i], vec_tmp_M);
+			_mm_store_si128((__m128i*) & I[Offset + i], vec_tmp_I);
+			_mm_store_si128((__m128i*) & V[i], vec_tmp_V);
+		}
 }
 
 void InitErosionDilatation(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* M)
@@ -210,10 +259,10 @@ int main(int argc, char* argv[])
 	}
 	
 	// Initialisation des matrices pour SigmaDelta
-	FirstStepSigmaDelta(NbPixels, Matrice_M, Images, Matrice_V);
+	FirstStepSigmaDelta_simd(NbPixels, Matrice_M, Images, Matrice_V);
 	// Traitement des images suivantes
 	Duree_Tmp = __rdtsc();
-	SigmaDelta(NbPixels, NbImages -1 , Matrice_M, Images + NbPixels, Matrice_V, N);
+	SigmaDelta_simd(NbPixels, NbImages -1 , Matrice_M, Images + NbPixels, Matrice_V, N);
 	Duree_SigmaDelta = __rdtsc() - Duree_Tmp;
 
 	// Ecriture des images
