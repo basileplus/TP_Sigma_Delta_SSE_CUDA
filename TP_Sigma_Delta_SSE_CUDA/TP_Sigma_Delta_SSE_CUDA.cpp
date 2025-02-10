@@ -7,6 +7,7 @@
 #define	STRING_LENGTH	1024
 #define	WHITE			0xFF
 #define BLACK			0x00
+#define SIMD 1
 
 #define ALIGNMENT	16
 
@@ -89,6 +90,8 @@ void SigmaDelta_simd(unsigned int NbPixels, unsigned int NbImages, unsigned char
 	__m128i	vec_tmp_V, vec_DeltaN = _mm_set1_epi16(0x0000); //short
 	__m128i vec_mask, vec_inc, vec_dec;
 	__m128i vec_white = _mm_set1_epi8(WHITE);
+	__m128i vec_zero = _mm_set1_epi8(0x00);
+	__m128i vec_one = _mm_set1_epi8(0x01);
 
 	for (j = 0, Offset = 0; j < NbImages; j++, Offset += NbPixels)
 		for (i = 0; i < NbPixels; i+=16) {
@@ -101,23 +104,25 @@ void SigmaDelta_simd(unsigned int NbPixels, unsigned int NbImages, unsigned char
 			// Pb : les comparaisons existent que sur les epi
 			// on fait subs(a,b) on aura : 0 si b>a (valeur saturee) ; une valeur >=1 si a>b ; ça donne un masque interessant pour faire l'operation
 			// si on prend min(subs(a,b);0x1) on aura 0 si b>a et 0x1 sinon
-			vec_tmp_M = _mm_adds_epu8(vec_tmp_M,_mm_min_epu8(_mm_subs_epu8(vec_tmp_M, vec_tmp_I), _mm_set1_epi8(1))); // if (tmp_M < tmp_I) tmp_M++;
-			vec_tmp_M = _mm_subs_epu8(vec_tmp_M, _mm_min_epu8(_mm_subs_epu8(vec_tmp_I, vec_tmp_M), _mm_set1_epi8(1))); // if (tmp_I < tmp_M) tmp_M--;
+			vec_tmp_M = _mm_adds_epu8(vec_tmp_M,_mm_min_epu8(_mm_subs_epu8(vec_tmp_I, vec_tmp_M), vec_one)); // if (tmp_M < tmp_I) tmp_M++;
+			vec_tmp_M = _mm_subs_epu8(vec_tmp_M, _mm_min_epu8(_mm_subs_epu8(vec_tmp_M, vec_tmp_I), vec_one)); // if (tmp_I < tmp_M) tmp_M--;
 
 			vec_Delta = _mm_subs_epu8(_mm_max_epu8(vec_tmp_M,vec_tmp_I), _mm_min_epu8(vec_tmp_M,vec_tmp_I));
 
 			// vec_DeltaN = _mm_vec_Delta * N;
-			for (n = 0; n < N; n++) {
+			vec_DeltaN = vec_Delta;
+			for (n = 1;  n < N; n++) {
 				vec_DeltaN = _mm_adds_epu8(vec_DeltaN, vec_Delta);
 			}
-			vec_mask = _mm_cmpeq_epi8(vec_Delta, _mm_set1_epi8(0x00)); // if Delta==0
-			vec_inc = _mm_andnot_si128(vec_mask, _mm_min_epu8(_mm_subs_epi8(vec_DeltaN, vec_tmp_V), _mm_set1_epi8(1))); // vec_inc = 1 if (tmp_V < DeltaN) & Delta!0
-			vec_dec = _mm_andnot_si128(vec_mask, _mm_min_epu8(_mm_subs_epi8(vec_tmp_V, vec_DeltaN), _mm_set1_epi8(1))); // vec_inc = 1 if (tmp_V > DeltaN) & Delta!0
 
-			vec_tmp_V = _mm_adds_epu8(vec_tmp_M, vec_inc); // tmp_V += vec_inc;
-			vec_tmp_V = _mm_subs_epu8(vec_tmp_M, vec_dec); // tmp_V += vec_dec;
+			vec_mask = _mm_cmpeq_epi8(vec_Delta, vec_zero); // if Delta==0
+			vec_inc = _mm_andnot_si128(vec_mask, _mm_min_epu8(_mm_subs_epu8(vec_DeltaN, vec_tmp_V), vec_one)); // vec_inc = 1 if (tmp_V < DeltaN) & Delta!0
+			vec_dec = _mm_andnot_si128(vec_mask, _mm_min_epu8(_mm_subs_epu8(vec_tmp_V, vec_DeltaN), vec_one)); // vec_inc = 1 if (tmp_V > DeltaN) & Delta!0
 
-			vec_mask = _mm_cmpeq_epi8(_mm_min_epu8(vec_Delta, vec_tmp_V), vec_Delta); // if Delta < tmp_V
+			vec_tmp_V = _mm_adds_epu8(vec_tmp_V, vec_inc); // tmp_V += vec_inc;
+			vec_tmp_V = _mm_subs_epu8(vec_tmp_V, vec_dec); // tmp_V += vec_dec;
+
+			vec_mask = _mm_cmpeq_epi8(_mm_subs_epu8(vec_Delta, vec_tmp_V), vec_zero); // if Delta < tmp_V
 			vec_tmp_I = vec_mask; // I = 0xff  if Delta < tmp_V, 0x00 else
 		
 			_mm_store_si128((__m128i*) & M[i], vec_tmp_M);
@@ -126,24 +131,25 @@ void SigmaDelta_simd(unsigned int NbPixels, unsigned int NbImages, unsigned char
 		}
 }
 
-void InitErosionDilatation(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* M)
-{
-	unsigned int i, j, NbPixels = Width * Height, Offset;
 
-	for (j = 0, Offset = 0; j < NbImages; j++, Offset += NbPixels)
+	void InitErosionDilatation(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* M)
 	{
-		for (i = 0; i < Width; i++)
+		unsigned int i, j, NbPixels = Width * Height, Offset;
+
+		for (j = 0, Offset = 0; j < NbImages; j++, Offset += NbPixels)
 		{
-			M[Offset + i] = WHITE;							// <=> (*M)[j][0][i] = WHITE
-			M[Offset + (Height - 1) * Width + i] = WHITE;	// <=> (*M)[j][Height-1][i] = WHITE
-		}
-		for (i = 0; i < Height; i++)
-		{
-			M[Offset + i * Width] = WHITE;					// <=> (*M)[j][i][0] = WHITE
-			M[Offset + (i + 1) * Width - 1] = WHITE;		// <=> (*M)[j][i][Width-1] = WHITE
+			for (i = 0; i < Width; i++)
+			{
+				M[Offset + i] = WHITE;							// <=> (*M)[j][0][i] = WHITE
+				M[Offset + (Height - 1) * Width + i] = WHITE;	// <=> (*M)[j][Height-1][i] = WHITE
+			}
+			for (i = 0; i < Height; i++)
+			{
+				M[Offset + i * Width] = WHITE;					// <=> (*M)[j][i][0] = WHITE
+				M[Offset + (i + 1) * Width - 1] = WHITE;		// <=> (*M)[j][i][Width-1] = WHITE
+			}
 		}
 	}
-}
 
 void InitErosionDilatation_simd(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* M)
 {
@@ -155,7 +161,7 @@ void MorphoErosion(unsigned int Width, unsigned int Height, unsigned int NbImage
 	unsigned int i, j, k, NbPixels = Width * Height, Offset;
 
 	for (k = 0, Offset = 0; k < NbImages; k++, Offset += NbPixels)
-		for (j = 1; j < (Height - 1); j++)
+		for (j = 1; j < (Height - 1); j++)	
 			for (i = 1; i < (Width - 1); i++)
 				if ((Src[Offset + (j - 1) * Width + i - 1] == BLACK) &&
 					(Src[Offset + (j - 1) * Width + i] == BLACK) &&
@@ -259,10 +265,10 @@ int main(int argc, char* argv[])
 	}
 	
 	// Initialisation des matrices pour SigmaDelta
-	FirstStepSigmaDelta_simd(NbPixels, Matrice_M, Images, Matrice_V);
+	FirstStepSigmaDelta(NbPixels, Matrice_M, Images, Matrice_V);
 	// Traitement des images suivantes
 	Duree_Tmp = __rdtsc();
-	SigmaDelta_simd(NbPixels, NbImages -1 , Matrice_M, Images + NbPixels, Matrice_V, N);
+	SigmaDelta(NbPixels, NbImages -1 , Matrice_M, Images + NbPixels, Matrice_V, N);
 	Duree_SigmaDelta = __rdtsc() - Duree_Tmp;
 
 	// Ecriture des images
