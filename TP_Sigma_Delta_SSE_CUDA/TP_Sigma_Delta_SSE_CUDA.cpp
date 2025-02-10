@@ -14,8 +14,8 @@
 #define vec_left1(v0, v1) _mm_or_si128(_mm_srli_si128 (v0, 15), _mm_slli_si128 (v1,  1))
 #define vec_right1(v1, v2) _mm_or_si128(_mm_srli_si128 (v1,  1), _mm_slli_si128 (v2, 15))
 
-#define	SCALAIRE
-//#define SIMD
+//#define	SCALAIRE
+#define SIMD
 //#define CUDA
 
 void FirstStepSigmaDelta(unsigned int NbPixels, unsigned char* M, unsigned char* I, unsigned short* V)
@@ -153,7 +153,22 @@ void SigmaDelta_simd(unsigned int NbPixels, unsigned int NbImages, unsigned char
 
 void InitErosionDilatation_simd(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* M)
 {
-	// A COMPLETER
+	unsigned int i, j, NbPixels = Width * Height, Offset;
+	__m128i vec_white = _mm_set1_epi8(WHITE);
+
+	for (j = 0, Offset = 0; j < NbImages; j++, Offset += NbPixels)
+	{
+		for (i = 0; i < Width; i+=16)
+		{
+			_mm_store_si128((__m128i*) & M[Offset+i], vec_white); // <=> (*M)[j][0][i] = WHITE
+			_mm_store_si128((__m128i*) & M[Offset + (Height - 1) * Width + i], vec_white); // <=> (*M)[j][Height-1][i] = WHITE
+		}
+		for (i = 0; i < Height; i++)
+		{
+			_mm_store_si128((__m128i*) & M[Offset + i * Width], vec_white); // <=> (*M)[j][i][0] = WHITE sur 16 lignes
+			_mm_store_si128((__m128i*) & M[Offset - 16 + (i + 1) * Width - 1], vec_white); // <=> (*M)[j][i][Width-1] = WHITE sur 16 lignes
+		}
+	}
 }
 
 void MorphoErosion(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* Src, unsigned char* Dst)
@@ -179,7 +194,63 @@ void MorphoErosion(unsigned int Width, unsigned int Height, unsigned int NbImage
 
 void MorphoErosion_simd(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* Src, unsigned char* Dst)
 {
-	// A COMPLETER
+	unsigned int i, j, k, NbPixels, Offset;
+	NbPixels = Width * Height;
+	Offset = 0;
+
+	__m128i v0, v1, vZero, vWhite;
+	vZero = _mm_setzero_si128();
+	vWhite = _mm_set1_epi8((char)WHITE);
+
+	// Pointeurs pour parcourir les 3 lignes
+	unsigned char* p0, * p1, * p2, * pDst;
+
+	for (k = 0; k < NbImages; k++, Offset += NbPixels)
+	{
+		for (j = 1; j < Height - 1; j++)
+		{
+			// On définit les pointeurs pour la ligne du dessus, la ligne courante et la ligne du dessous.
+			p0 = Src + Offset + (j - 1) * Width;
+			p1 = Src + Offset + j * Width;
+			p2 = Src + Offset + (j + 1) * Width;
+			pDst = Dst + Offset + j * Width;
+			// On parcourt les colonnes de 1 à Width-2 par blocs de 16 pixels.
+			for (i = 1; i < Width - 1; i += 16)
+			{
+				// Ligne j-1
+				v0 = _mm_loadu_si128((__m128i*)(p0 + i - 1)); // colonnes i-1 à i+14
+				v1 = _mm_loadu_si128((__m128i*)(p0 + i));     // colonnes i à i+15
+				v0 = _mm_or_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p0 + i + 1));   // colonnes i+1 à i+16
+				v0 = _mm_or_si128(v0, v1);
+
+				// Ligne j (courante)
+				v1 = _mm_loadu_si128((__m128i*)(p1 + i - 1));
+				v0 = _mm_or_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p1 + i));
+				v0 = _mm_or_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p1 + i + 1));
+				v0 = _mm_or_si128(v0, v1);
+
+				// Ligne j+1
+				v1 = _mm_loadu_si128((__m128i*)(p2 + i - 1));
+				v0 = _mm_or_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p2 + i));
+				v0 = _mm_or_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p2 + i + 1));
+				v0 = _mm_or_si128(v0, v1);
+
+				// Si v0 vaut zéro alors tous les 9 pixels sont BLACK.
+				// _mm_cmpeq_epi8 renvoie 0xFF pour les octets égaux à zéro, 0 sinon.
+				v0 = _mm_cmpeq_epi8(v0, vZero);
+				// Pour obtenir le résultat final : si tous noirs, on veut BLACK (0x00) ; sinon WHITE (0xff).
+				// Ainsi, on inverse le masque avec _mm_andnot_si128 : ~mask & 0xFF.
+				v0 = _mm_andnot_si128(v0, vWhite);
+
+				_mm_storeu_si128((__m128i*)(pDst + i), v0);
+			}
+		}
+	}
 }
 
 void MorphoDilatation(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* Src, unsigned char* Dst)
@@ -203,9 +274,66 @@ void MorphoDilatation(unsigned int Width, unsigned int Height, unsigned int NbIm
 					Dst[Offset + j * Width + i] = WHITE;
 }
 
-void MorphoDilatation_simd(unsigned int Width, unsigned int Height, unsigned int NbImages, unsigned char* Src, unsigned char* Dst)
+void MorphoDilatation_simd(unsigned int Width, unsigned int Height, unsigned int NbImages,
+	unsigned char* Src, unsigned char* Dst)
 {
-	// A COMPLETER
+	unsigned int i, j, k, NbPixels, Offset;
+	NbPixels = Width * Height;
+	Offset = 0;
+
+	// Déclaration des variables SIMD
+	__m128i v0, v1, vWhite;
+	vWhite = _mm_set1_epi8((char)WHITE);
+
+	// Pointeurs pour accéder aux 3 lignes
+	unsigned char* p0, * p1, * p2, * pDst;
+
+	for (k = 0; k < NbImages; k++, Offset += NbPixels) {
+		for (j = 1; j < Height - 1; j++) {
+			// Définir les pointeurs pour la ligne supérieure, la ligne courante et la ligne inférieure
+			p0 = Src + Offset + (j - 1) * Width;
+			p1 = Src + Offset + j * Width;
+			p2 = Src + Offset + (j + 1) * Width;
+			pDst = Dst + Offset + j * Width;
+
+			// Parcours des colonnes intérieures par blocs de 16 pixels
+			for (i = 1; i < Width - 1; i += 16) {
+				// --- Ligne j-1 ---
+				v0 = _mm_loadu_si128((__m128i*)(p0 + i - 1));  // colonnes i-1 à i+14
+				v1 = _mm_loadu_si128((__m128i*)(p0 + i));       // colonnes i à i+15
+				v0 = _mm_and_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p0 + i + 1));    // colonnes i+1 à i+16
+				v0 = _mm_and_si128(v0, v1);
+
+				// --- Ligne j (courante) ---
+				v1 = _mm_loadu_si128((__m128i*)(p1 + i - 1));
+				v0 = _mm_and_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p1 + i));
+				v0 = _mm_and_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p1 + i + 1));
+				v0 = _mm_and_si128(v0, v1);
+
+				// --- Ligne j+1 ---
+				v1 = _mm_loadu_si128((__m128i*)(p2 + i - 1));
+				v0 = _mm_and_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p2 + i));
+				v0 = _mm_and_si128(v0, v1);
+				v1 = _mm_loadu_si128((__m128i*)(p2 + i + 1));
+				v0 = _mm_and_si128(v0, v1);
+
+				// À ce stade, v0 contient le AND bit-à-bit des 9 pixels de la fenêtre 3×3.
+				// Si tous les pixels étaient WHITE (0xFF), alors v0 vaut 0xFF dans chaque octet.
+				// Sinon (si au moins un pixel vaut BLACK, c'est-à-dire 0x00), v0 sera égal à 0.
+				// On compare alors v0 à un vecteur rempli de WHITE pour obtenir :
+				//    - 0xFF (WHITE) si tous les pixels étaient WHITE,
+				//    - 0x00 (BLACK) sinon.
+				v0 = _mm_cmpeq_epi8(v0, vWhite);
+
+				// Stockage du résultat dans Dst
+				_mm_storeu_si128((__m128i*)(pDst + i), v0);
+			}
+		}
+	}
 }
 
 int main(int argc, char* argv[])
@@ -350,7 +478,7 @@ int main(int argc, char* argv[])
 	}
 
 	// Initialisation des images pour l'érosion
-	InitErosionDilatation_simd(Width, Height, NbImages, Erosions);
+	InitErosionDilatation(Width, Height, NbImages, Erosions);
 	Duree_Tmp = __rdtsc();
 	MorphoErosion_simd(Width, Height, NbImages, Images, Erosions);
 	Duree_Erosion_simd = __rdtsc() - Duree_Tmp;
