@@ -14,7 +14,7 @@
 #define vec_left1(v0, v1) _mm_or_si128(_mm_srli_si128 (v0, 15), _mm_slli_si128 (v1,  1))
 #define vec_right1(v1, v2) _mm_or_si128(_mm_srli_si128 (v1,  1), _mm_slli_si128 (v2, 15))
 
-//#define	SCALAIRE
+#define	SCALAIRE
 #define SIMD
 //#define CUDA
 
